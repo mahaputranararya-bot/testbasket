@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Basket Online</title>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; user-select: none; }
+  html, body { margin: 0; height: 100%; background: #111; color: #fff; font-family: system-ui, sans-serif; overflow: hidden; }
+  #wrap { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
+  canvas { background: #8fd3ff; max-width: 100vw; max-height: 100vh; touch-action: none; }
+  #menu { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 14px; background: rgba(10,10,20,.88); z-index: 2; text-align: center; padding: 20px; }
+  h1 { margin: 0 0 8px; font-size: 44px; letter-spacing: 1px; }
+  h1 span { color: #ff8a00; }
+  button { font-size: 20px; padding: 12px 26px; border: 0; border-radius: 12px; background: #ff8a00; color: #111; font-weight: 700; cursor: pointer; }
+  button.alt { background: #3a86ff; color: #fff; }
+  input { font-size: 22px; padding: 10px; width: 140px; text-align: center; text-transform: uppercase; border-radius: 10px; border: 0; }
+  #code { font-size: 54px; font-weight: 800; letter-spacing: 8px; color: #ffd166; }
+  .small { opacity: .75; font-size: 15px; max-width: 420px; }
+  .hidden { display: none !important; }
+  #err { color: #ff6b6b; min-height: 20px; }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="c" width="1000" height="600"></canvas></div>
+
+<div id="menu">
+  <div id="home">
+    <h1>BASKET <span>ONLINE</span></h1>
+    <p class="small">One button. Two floppy players. First to 5 wins.<br>Press <b>Space / W / ↑</b>, click, or tap the screen.</p>
+    <p><button id="createBtn">Create room</button></p>
+    <p><input id="joinInput" maxlength="4" placeholder="CODE"> <button class="alt" id="joinBtn">Join</button></p>
+    <div id="err"></div>
+  </div>
+  <div id="waiting" class="hidden">
+    <p class="small">Send this code to your friend:</p>
+    <div id="code"></div>
+    <p class="small">Waiting for player 2 to join…</p>
+  </div>
+  <div id="overBox" class="hidden">
+    <h1 id="overText"></h1>
+    <p><button id="rematchBtn">Rematch</button></p>
+    <p class="small" id="rematchInfo"></p>
+  </div>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+const socket = io();
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const $ = (id) => document.getElementById(id);
+const show = (id) => { ['home','waiting','overBox'].forEach(x => $(x).classList.toggle('hidden', x !== id)); $('menu').classList.remove('hidden'); };
+const COLORS = ['#e63946', '#3a86ff'];
+let game = null, snap = null, prevSnap = null, snapTime = 0, banner = null, bannerUntil = 0;
+
+$('createBtn').onclick = () => socket.emit('create');
+$('joinBtn').onclick = () => socket.emit('join', $('joinInput').value);
+$('joinInput').onkeydown = (e) => { if (e.key === 'Enter') $('joinBtn').click(); };
+$('rematchBtn').onclick = () => { socket.emit('rematch'); $('rematchInfo').textContent = 'Waiting for opponent…'; };
+
+socket.on('created', ({ code }) => { $('code').textContent = code; show('waiting'); });
+socket.on('err', (m) => { $('err').textContent = m; });
+socket.on('start', (d) => {
+  game = d; snap = prevSnap = null;
+  $('menu').classList.add('hidden');
+  flash(`You are ${d.team === 0 ? 'RED (left)' : 'BLUE (right)'} — ${d.variant.name}`, 2200);
+});
+socket.on('s', (s) => { prevSnap = snap; snap = s; snapTime = performance.now(); });
+socket.on('point', ({ team, score }) => { game.score = score; flash(team === game.team ? 'YOU SCORED!' : 'Opponent scored', 1500); });
+socket.on('round', ({ variant, score }) => { game.variant = variant; game.score = score; flash(variant.name, 1200); });
+socket.on('over', ({ winner }) => {
+  $('overText').textContent = winner === game.team ? '🏆 YOU WIN!' : 'You lose…';
+  $('rematchInfo').textContent = ''; show('overBox');
+});
+socket.on('rematchVote', (v) => { if (v[1 - game.team]) $('rematchInfo').textContent = 'Opponent wants a rematch!'; });
+socket.on('left', () => { game = null; $('err').textContent = 'Opponent left the game.'; show('home'); });
+function flash(t, ms) { banner = t; bannerUntil = performance.now() + ms; }
+
+// ---- Input: one button (keyboard, mouse, touch) ----
+let down = false;
+const setDown = (v) => { if (v !== down) { down = v; socket.emit('input', v); } };
+const KEYS = [' ', 'w', 'W', 'ArrowUp'];
+addEventListener('keydown', (e) => { if (KEYS.includes(e.key) && document.activeElement.tagName !== 'INPUT') { e.preventDefault(); setDown(true); } });
+addEventListener('keyup', (e) => { if (KEYS.includes(e.key)) setDown(false); });
+cv.addEventListener('pointerdown', (e) => { e.preventDefault(); setDown(true); });
+addEventListener('pointerup', () => setDown(false));
+addEventListener('pointercancel', () => setDown(false));
+addEventListener('blur', () => setDown(false));
+
+// ---- Rendering ----
+const lerp = (a, b, t) => a + (b - a) * t;
+const lerpA = (a, b, t) => a + (b - a) * t;
+function interp() {
+  if (!snap) return null;
+  if (!prevSnap) return snap;
+  const t = Math.min(1, (performance.now() - snapTime) / (1000 / 60));
+  return {
+    c: snap.c.map((c, i) => c.map((v, j) => (j >= 6 ? v : (prevSnap.c[i] ? lerpA(prevSnap.c[i][j], v, t) : v)))),
+    b: snap.b.map((v, j) => lerp(prevSnap.b[j], v, t)),
+  };
+}
+
+function roundRect(x, y, w, h, r) { ctx.beginPath(); ctx.roundRect(x, y, w, h, r); }
+
+function drawHoop(h, rimY, flip) {
+  // pole + backboard
+  ctx.fillStyle = '#555'; ctx.fillRect(h.board - 4 + (flip ? 8 : -8), rimY - 120, 8, game.floor - rimY + 120);
+  ctx.fillStyle = '#fff'; ctx.strokeStyle = '#333'; ctx.lineWidth = 3;
+  ctx.fillRect(h.board - 6, rimY - 115, 12, 130); ctx.strokeRect(h.board - 6, rimY - 115, 12, 130);
+  // net
+  ctx.strokeStyle = 'rgba(255,255,255,.9)'; ctx.lineWidth = 2;
+  const x0 = Math.min(h.back, h.front), x1 = Math.max(h.back, h.front);
+  for (let i = 0; i <= 5; i++) {
+    const tx = lerp(x0, x1, i / 5), bx = lerp(x0 + 15, x1 - 15, i / 5);
+    ctx.beginPath(); ctx.moveTo(tx, rimY); ctx.lineTo(bx, rimY + 55); ctx.stroke();
+  }
+  ctx.beginPath(); ctx.moveTo(x0 + 7, rimY + 25); ctx.lineTo(x1 - 7, rimY + 25); ctx.stroke();
+  // rim
+  ctx.strokeStyle = '#ff5400'; ctx.lineWidth = 6;
+  ctx.beginPath(); ctx.moveTo(h.back, rimY); ctx.lineTo(h.front, rimY); ctx.stroke();
+}
+
+function drawChar(c) {
+  const [x, y, a, ax, ay, aa, h, al, team] = c;
+  const col = COLORS[team];
+  // arm behind? draw body first, arm on top
+  ctx.save(); ctx.translate(x, y); ctx.rotate(a);
+  // legs
+  ctx.fillStyle = '#222'; ctx.fillRect(-14, h / 2 - h * 0.28, 10, h * 0.28); ctx.fillRect(4, h / 2 - h * 0.28, 10, h * 0.28);
+  // jersey
+  ctx.fillStyle = col; roundRect(-17, -h / 2 + 22, 34, h - 22 - h * 0.25, 10); ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 14px system-ui'; ctx.textAlign = 'center';
+  ctx.fillText(team === game.team ? 'YOU' : '', 0, -h / 2 + 50);
+  // head
+  ctx.fillStyle = '#f1c27d'; ctx.beginPath(); ctx.arc(0, -h / 2 + 12, 16, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#222'; const f = team === 0 ? 1 : -1;
+  ctx.beginPath(); ctx.arc(6 * f, -h / 2 + 9, 2.6, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = col; ctx.fillRect(-16, -h / 2 - 4, 32, 7); // headband
+  ctx.restore();
+  // arm
+  ctx.save(); ctx.translate(ax, ay); ctx.rotate(aa);
+  ctx.fillStyle = col; roundRect(-6, -al / 2, 12, al * 0.45, 6); ctx.fill();
+  ctx.fillStyle = '#f1c27d'; roundRect(-5, -al / 2 + al * 0.4, 10, al * 0.6, 5); ctx.fill();
+  ctx.restore();
+}
+
+function drawBall(b) {
+  const [x, y, a] = b, r = game.variant.ballR;
+  ctx.save(); ctx.translate(x, y); ctx.rotate(a);
+  const beach = game.variant.name === 'Beach Ball';
+  if (beach) {
+    ['#ff595e', '#ffca3a', '#8ac926', '#1982c4'].forEach((c, i) => {
+      ctx.fillStyle = c; ctx.beginPath(); ctx.moveTo(0, 0); ctx.arc(0, 0, r, i * Math.PI / 2, (i + 1) * Math.PI / 2); ctx.fill();
+    });
+  } else {
+    ctx.fillStyle = game.variant.name === 'Heavy Ball' ? '#444' : '#f77f00';
+    ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#2b1300'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(-r, 0); ctx.lineTo(r, 0); ctx.moveTo(0, -r); ctx.lineTo(0, r); ctx.stroke();
+    ctx.beginPath(); ctx.arc(-r * 1.1, 0, r * 0.8, -0.9, 0.9); ctx.stroke();
+    ctx.beginPath(); ctx.arc(r * 1.1, 0, r * 0.8, Math.PI - 0.9, Math.PI + 0.9); ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function render() {
+  requestAnimationFrame(render);
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  if (!game) { ctx.fillStyle = '#8fd3ff'; ctx.fillRect(0, 0, 1000, 600); return; }
+  const v = game.variant;
+  ctx.fillStyle = v.sky; ctx.fillRect(0, 0, game.W, game.H);
+  // crowd stripes
+  ctx.fillStyle = 'rgba(0,0,0,.12)'; for (let i = 0; i < 20; i++) ctx.fillRect(i * 55, 330, 30, 30);
+  ctx.fillStyle = v.court; ctx.fillRect(0, game.floor, game.W, game.H - game.floor);
+  ctx.strokeStyle = 'rgba(255,255,255,.6)'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(game.W / 2, game.floor); ctx.lineTo(game.W / 2, game.H); ctx.stroke();
+  drawHoop(game.hoops[0], game.rimY, false);
+  drawHoop(game.hoops[1], game.rimY, true);
+  const s = interp();
+  if (s) { s.c.forEach(drawChar); drawBall(s.b); }
+  // scoreboard
+  ctx.textAlign = 'center'; ctx.font = 'bold 46px system-ui';
+  ctx.fillStyle = COLORS[0]; ctx.fillText(game.score[0], game.W / 2 - 50, 60);
+  ctx.fillStyle = '#fff'; ctx.fillText('-', game.W / 2, 60);
+  ctx.fillStyle = COLORS[1]; ctx.fillText(game.score[1], game.W / 2 + 50, 60);
+  ctx.font = '16px system-ui'; ctx.fillStyle = 'rgba(255,255,255,.85)'; ctx.fillText(v.name + ' · room ' + game.code, game.W / 2, 85);
+  if (banner && performance.now() < bannerUntil) {
+    ctx.fillStyle = 'rgba(0,0,0,.45)'; ctx.fillRect(0, 230, game.W, 80);
+    ctx.fillStyle = '#ffd166'; ctx.font = 'bold 38px system-ui'; ctx.fillText(banner, game.W / 2, 283);
+  }
+}
+render();
+</script>
+</body>
+</html>
