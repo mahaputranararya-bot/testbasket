@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Basket Online</title>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; user-select: none; }
+  html, body { margin: 0; height: 100%; background: #111; color: #fff; font-family: system-ui, sans-serif; overflow: hidden; }
+  #wrap { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
+  canvas { background: #8fd3ff; max-width: 100vw; max-height: 100vh; touch-action: none; }
+  #menu { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 14px; background: rgba(10,10,20,.88); z-index: 2; text-align: center; padding: 20px; }
+  h1 { margin: 0 0 8px; font-size: 44px; letter-spacing: 1px; }
+  h1 span { color: #ff8a00; }
+  button { font-size: 20px; padding: 12px 26px; border: 0; border-radius: 12px; background: #ff8a00; color: #111; font-weight: 700; cursor: pointer; }
+  button.alt { background: #3a86ff; color: #fff; }
+  input { font-size: 22px; padding: 10px; width: 140px; text-align: center; text-transform: uppercase; border-radius: 10px; border: 0; }
+  #code { font-size: 54px; font-weight: 800; letter-spacing: 8px; color: #ffd166; }
+  .small { opacity: .75; font-size: 15px; max-width: 420px; }
+  .hidden { display: none !important; }
+  #err { color: #ff6b6b; min-height: 20px; }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="c" width="1000" height="600"></canvas></div>
+
+<div id="menu">
+  <div id="home">
+    <h1>BASKET <span>ONLINE</span></h1>
+    <p class="small">One button. Two floppy players. First to 5 wins.<br>Press <b>Space / W / ↑</b>, click, or tap the screen.</p>
+    <p><button id="createBtn">Create room</button></p>
+    <p><input id="joinInput" maxlength="4" placeholder="CODE"> <button class="alt" id="joinBtn">Join</button></p>
+    <div id="err"></div>
+  </div>
+  <div id="waiting" class="hidden">
+    <p class="small">Send this code to your friend:</p>
+    <div id="code"></div>
+    <p class="small">Waiting for player 2 to join…</p>
+  </div>
+  <div id="overBox" class="hidden">
+    <h1 id="overText"></h1>
+    <p><button id="rematchBtn">Rematch</button></p>
+    <p class="small" id="rematchInfo"></p>
+  </div>
+</div>
+
+
+<script src="https://cdn.jsdelivr.net/npm/matter-js@0.20.0/build/matter.min.js"></script>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>
+// ===== Peer-to-peer layer: the host's browser runs the physics =====
+const { Engine, Bodies, Body, Composite, Constraint } = Matter;
+const W = 1000, H = 600, FLOOR = 540, WIN_SCORE = 5;
+const RIM_Y = 250;
+// Hoops: index 0 = left hoop (team 1 shoots here), 1 = right hoop (team 0 shoots here)
+const HOOPS = [
+  { board: 40, back: 58, front: 150 },
+  { board: W - 40, back: W - 58, front: W - 150 },
+];
+
+const BASE = { name: 'Classic', gravity: 1, ballR: 18, ballDensity: 0.002, bounce: 0.75,
+  height: [95, 110], friction: 0.8, court: '#d9a066', sky: '#8fd3ff' };
+const VARIANTS = [
+  {},
+  { name: 'Beach Ball', ballR: 27, ballDensity: 0.0004, bounce: 0.9, court: '#f2d48b', sky: '#7fe0ff' },
+  { name: 'Heavy Ball', ballR: 15, ballDensity: 0.012, bounce: 0.35, court: '#9a9a9a', sky: '#c9c9d6' },
+  { name: 'Moon', gravity: 0.5, court: '#cfcfcf', sky: '#1b1b3a' },
+  { name: 'Giants', height: [125, 140] },
+  { name: 'Tiny', height: [65, 80], court: '#b5e08a' },
+  { name: 'Ice', friction: 0.02, court: '#dff3ff', sky: '#bfe6ff' },
+  { name: 'Mismatch', height: [65, 140], court: '#e3a3c7' },
+];
+const pickVariant = (prev) => {
+  let v; do { v = VARIANTS[Math.floor(Math.random() * VARIANTS.length)]; } while (v.name === prev && VARIANTS.length > 1);
+  return { ...BASE, ...v };
+};
+
+const rand = (a, b) => a + Math.random() * (b - a);
+
+function buildRound(room) {
+  const v = room.variant = pickVariant(room.variant && room.variant.name);
+  const engine = room.engine = Engine.create();
+  engine.gravity.y = v.gravity;
+  const st = { isStatic: true, friction: v.friction, restitution: 0.2 };
+  Composite.add(engine.world, [
+    Bodies.rectangle(W / 2, FLOOR + 50, W * 2, 100, st),
+    Bodies.rectangle(-25, H / 2, 50, H * 4, st),
+    Bodies.rectangle(W + 25, H / 2, 50, H * 4, st),
+    Bodies.rectangle(W / 2, -300, W * 2, 50, st),
+  ]);
+  for (const h of HOOPS) {
+    Composite.add(engine.world, [
+      Bodies.rectangle(h.board, RIM_Y - 50, 12, 130, { isStatic: true, restitution: 0.5 }),
+      Bodies.circle(h.back, RIM_Y, 5, { isStatic: true, restitution: 0.5 }),
+      Bodies.circle(h.front, RIM_Y, 5, { isStatic: true, restitution: 0.5 }),
+    ]);
+  }
+  // Characters: 2 per team, one button controls both
+  room.chars = [];
+  const starts = [[260, 380], [740, 620]];
+  let group = -1;
+  for (let team = 0; team < 2; team++) {
+    for (let i = 0; i < 2; i++) {
+      const h = rand(v.height[0], v.height[1]);
+      const x = starts[team][i];
+      const body = Bodies.rectangle(x, FLOOR - h / 2 - 2, 34, h, {
+        chamfer: { radius: 14 }, density: 0.0025, friction: v.friction, frictionAir: 0.01,
+        collisionFilter: { group }, restitution: 0.1,
+      });
+      const armLen = h * 0.62;
+      const arm = Bodies.rectangle(x, FLOOR - h / 2 - 2 - h * 0.28 + armLen / 2, 12, armLen, {
+        density: 0.0005, collisionFilter: { group }, frictionAir: 0.02,
+      });
+      const joint = Constraint.create({ bodyA: body, pointA: { x: 0, y: -h * 0.28 }, bodyB: arm,
+        pointB: { x: 0, y: -armLen / 2 }, length: 0, stiffness: 1 });
+      Composite.add(engine.world, [body, arm, joint]);
+      room.chars.push({ team, body, arm, h, armLen, face: team === 0 ? 1 : -1, jumpCd: 0, grabCd: 0, prevHand: null });
+      group--;
+    }
+  }
+  const ball = room.ball = Bodies.circle(W / 2, 120, v.ballR, {
+    density: v.ballDensity, restitution: v.bounce, friction: 0.05, frictionAir: 0.002,
+  });
+  Body.setVelocity(ball, { x: rand(-1, 1), y: 0 });
+  Composite.add(engine.world, ball);
+  room.holder = -1; room.heldTicks = 0; room.prevBallY = ball.position.y; room.roundTicks = 0;
+}
+
+function handPos(c) {
+  const a = c.arm.angle, d = c.armLen / 2;
+  return { x: c.arm.position.x - Math.sin(a) * d, y: c.arm.position.y + Math.cos(a) * d };
+}
+
+function step(room) {
+  const v = room.variant, ball = room.ball;
+  const playing = room.state === 'playing';
+  room.roundTicks++;
+  room.chars.forEach((c, idx) => {
+    const pressed = playing && room.input[c.team];
+    const b = c.body;
+    const grounded = b.bounds.max.y > FLOOR - 6 && Math.abs(b.velocity.y) < 2.5;
+    // Wobbly self-righting (weaker in the air, so they flop around)
+    const k = grounded ? 0.035 : 0.008;
+    Body.setAngularVelocity(b, b.angularVelocity * 0.96 - b.angle * k);
+    // Jump in the direction the body is leaning -> the "random" feel
+    c.jumpCd--;
+    if (pressed && grounded && c.jumpCd <= 0) {
+      const j = 10.5 * Math.sqrt(0.6 + 0.4 * v.gravity);
+      Body.setVelocity(b, { x: b.velocity.x + Math.sin(b.angle) * j + c.face * 2.2, y: -Math.cos(b.angle) * j });
+      Body.setAngularVelocity(b, b.angularVelocity + c.face * 0.06);
+      c.jumpCd = 22;
+    }
+    // Arm motor: raise arm forward-up while pressed, hang down when released
+    const rel = c.arm.angle - b.angle;
+    const target = pressed ? -c.face * 2.8 : 0;
+    Body.setAngularVelocity(c.arm, b.angularVelocity + (target - rel) * (pressed ? 0.35 : 0.12));
+    c.grabCd--;
+    const hand = handPos(c);
+    c.handVel = c.prevHand ? { x: hand.x - c.prevHand.x, y: hand.y - c.prevHand.y } : { x: 0, y: 0 };
+    c.prevHand = hand;
+    // Grab / steal
+    const dist = Math.hypot(hand.x - ball.position.x, hand.y - ball.position.y);
+    if (playing && c.grabCd <= 0 && dist < v.ballR + 14 && room.holder !== idx) {
+      const holderChar = room.chars[room.holder];
+      const free = room.holder === -1;
+      const canSteal = holderChar && holderChar.team !== c.team && pressed && room.heldTicks > 20 && Math.random() < 0.15;
+      if (free || canSteal) {
+        if (holderChar) holderChar.grabCd = 30;
+        room.holder = idx; room.heldTicks = 0; ball.isSensor = true;
+      }
+    }
+  });
+
+  // Held ball follows the hand; throw when the arm swings up
+  if (room.holder >= 0) {
+    const c = room.chars[room.holder];
+    room.heldTicks++;
+    const hand = handPos(c);
+    Body.setPosition(ball, { x: hand.x, y: hand.y });
+    Body.setVelocity(ball, c.handVel);
+    const raised = -(c.arm.angle - c.body.angle) * c.face;
+    if (room.input[c.team] && raised > 2.1 && room.heldTicks > 12) throwBall(room, c, hand);
+  }
+
+  Engine.update(room.engine, 1000 / 60);
+
+  // Scoring: ball passes downward through a rim
+  if (room.state === 'playing') {
+    const y0 = room.prevBallY, y1 = ball.position.y, x = ball.position.x;
+    if (room.holder === -1 && y0 < RIM_Y && y1 >= RIM_Y) {
+      HOOPS.forEach((h, i) => {
+        const lo = Math.min(h.back, h.front) + 6, hi = Math.max(h.back, h.front) - 6;
+        if (x > lo && x < hi) scorePoint(room, i === 1 ? 0 : 1);
+      });
+    }
+  }
+  room.prevBallY = ball.position.y;
+  // Safety: if ball escapes or the round stalls, re-drop it
+  if (ball.position.y > H + 100 || ball.position.x < -100 || ball.position.x > W + 100) {
+    Body.setPosition(ball, { x: W / 2, y: 100 }); Body.setVelocity(ball, { x: 0, y: 0 });
+  }
+}
+
+function throwBall(room, c, hand) {
+  const ball = room.ball, v = room.variant;
+  const targetHoop = HOOPS[c.team === 0 ? 1 : 0];
+  const tx = (targetHoop.back + targetHoop.front) / 2;
+  const g = 0.001 * v.gravity * (1000 / 60) ** 2; // px per tick^2 in matter.js
+  const apex = Math.min(hand.y, RIM_Y) - rand(90, 170);
+  const vy = -Math.sqrt(2 * g * Math.max(20, hand.y - apex));
+  const T = -vy / g + Math.sqrt(2 * (RIM_Y - apex) / g);
+  const error = rand(0.8, 1.2) + (Math.abs(c.body.angle) > 0.5 ? rand(-0.4, 0.4) : 0);
+  const vx = ((tx - hand.x) / T) * error;
+  room.holder = -1; ball.isSensor = false; c.grabCd = 25;
+  Body.setPosition(ball, { x: hand.x, y: hand.y - 6 });
+  Body.setVelocity(ball, { x: vx, y: vy });
+}
+
+function scorePoint(room, team) {
+  room.score[team]++;
+  room.state = 'point';
+  emitAll('point', { team, score: room.score });
+  setTimeout(() => {
+    if (room.closed) return;
+    if (room.score[team] >= WIN_SCORE) {
+      room.state = 'over';
+      emitAll('over', { winner: team, score: room.score });
+    } else {
+      buildRound(room); room.state = 'playing';
+      emitAll('round', { variant: room.variant, score: room.score });
+    }
+  }, 1600);
+}
+
+const r1 = (n) => Math.round(n * 10) / 10;
+function snapshot(room) {
+  return {
+    c: room.chars.map((c) => [r1(c.body.position.x), r1(c.body.position.y), r1(c.body.angle * 100) / 100,
+      r1(c.arm.position.x), r1(c.arm.position.y), Math.round(c.arm.angle * 100) / 100, Math.round(c.h), Math.round(c.armLen), c.team]),
+    b: [r1(room.ball.position.x), r1(room.ball.position.y), Math.round(room.ball.angle * 100) / 100],
+  };
+}
+
+
+const PREFIX = 'basketonline-nara-';
+let peer = null, conn = null, room = null, isHost = false;
+const handlers = {};
+const socket = {
+  on: (ev, fn) => { handlers[ev] = fn; },
+  emit: (ev, data) => {
+    if (ev === 'create') return hostGame();
+    if (ev === 'join') return joinGame(data);
+    if (isHost) localFromMe(ev, data, 0);
+    else if (conn) conn.send({ ev, data });
+  },
+};
+const fire = (ev, data) => handlers[ev] && handlers[ev](data);
+function emitAll(ev, data) { fire(ev, data); if (conn && conn.open) conn.send({ ev, data }); }
+function localFromMe(ev, data, team) {
+  if (!room) return;
+  if (ev === 'input') room.input[team] = !!data;
+  if (ev === 'rematch' && room.state === 'over') {
+    room.rematch[team] = true; emitAll('rematchVote', room.rematch);
+    if (room.rematch[0] && room.rematch[1]) startP2P();
+  }
+}
+function hostGame() {
+  isHost = true;
+  const code = Math.random().toString(36).slice(2, 6).toUpperCase();
+  peer = new Peer(PREFIX + code);
+  peer.on('open', () => fire('created', { code }));
+  peer.on('error', (e) => fire('err', 'Connection error: ' + e.type));
+  peer.on('connection', (c) => {
+    if (conn) { c.close(); return; }
+    conn = c;
+    c.on('open', () => { room = { code, input: [false, false], state: 'waiting' }; startP2P(); });
+    c.on('data', (m) => localFromMe(m.ev, m.data, 1));
+    c.on('close', () => { stopRoom(); fire('left'); });
+  });
+}
+function joinGame(raw) {
+  isHost = false;
+  const code = String(raw || '').trim().toUpperCase();
+  if (!code) return fire('err', 'Type a code first');
+  fire('err', 'Connecting…');
+  peer = new Peer();
+  peer.on('error', (e) => fire('err', e.type === 'peer-unavailable' ? 'Room not found' : 'Connection error: ' + e.type));
+  peer.on('open', () => {
+    conn = peer.connect(PREFIX + code);
+    conn.on('open', () => fire('err', ''));
+    conn.on('data', (m) => fire(m.ev, m.data));
+    conn.on('close', () => fire('left'));
+  });
+}
+function startP2P() {
+  room.score = [0, 0]; room.rematch = [false, false];
+  buildRound(room); room.state = 'playing';
+  const base = { code: room.code, variant: room.variant, score: room.score, hoops: HOOPS, rimY: RIM_Y, floor: FLOOR, W, H };
+  fire('start', { ...base, team: 0 });
+  conn.send({ ev: 'start', data: { ...base, team: 1 } });
+  if (!room.loop) room.loop = setInterval(() => {
+    if (room.state === 'over') return;
+    step(room);
+    emitAll('s', snapshot(room));
+  }, 1000 / 60);
+}
+function stopRoom() { if (room) { room.closed = true; clearInterval(room.loop); } room = null; conn = null; }
+</script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const $ = (id) => document.getElementById(id);
+const show = (id) => { ['home','waiting','overBox'].forEach(x => $(x).classList.toggle('hidden', x !== id)); $('menu').classList.remove('hidden'); };
+const COLORS = ['#e63946', '#3a86ff'];
+let game = null, snap = null, prevSnap = null, snapTime = 0, banner = null, bannerUntil = 0;
+
+$('createBtn').onclick = () => socket.emit('create');
+$('joinBtn').onclick = () => socket.emit('join', $('joinInput').value);
+$('joinInput').onkeydown = (e) => { if (e.key === 'Enter') $('joinBtn').click(); };
+$('rematchBtn').onclick = () => { socket.emit('rematch'); $('rematchInfo').textContent = 'Waiting for opponent…'; };
+
+socket.on('created', ({ code }) => { $('code').textContent = code; show('waiting'); });
+socket.on('err', (m) => { $('err').textContent = m; });
+socket.on('start', (d) => {
+  game = d; snap = prevSnap = null;
+  $('menu').classList.add('hidden');
+  flash(`You are ${d.team === 0 ? 'RED (left)' : 'BLUE (right)'} — ${d.variant.name}`, 2200);
+});
+socket.on('s', (s) => { prevSnap = snap; snap = s; snapTime = performance.now(); });
+socket.on('point', ({ team, score }) => { game.score = score; flash(team === game.team ? 'YOU SCORED!' : 'Opponent scored', 1500); });
+socket.on('round', ({ variant, score }) => { game.variant = variant; game.score = score; flash(variant.name, 1200); });
+socket.on('over', ({ winner }) => {
+  $('overText').textContent = winner === game.team ? '🏆 YOU WIN!' : 'You lose…';
+  $('rematchInfo').textContent = ''; show('overBox');
+});
+socket.on('rematchVote', (v) => { if (v[1 - game.team]) $('rematchInfo').textContent = 'Opponent wants a rematch!'; });
+socket.on('left', () => { game = null; if (typeof stopRoom==='function') stopRoom(); if (peer) { peer.destroy(); peer = null; } $('err').textContent = 'Opponent left the game.'; show('home'); });
+function flash(t, ms) { banner = t; bannerUntil = performance.now() + ms; }
+
+// ---- Input: one button (keyboard, mouse, touch) ----
+let down = false;
+const setDown = (v) => { if (v !== down) { down = v; socket.emit('input', v); } };
+const KEYS = [' ', 'w', 'W', 'ArrowUp'];
+addEventListener('keydown', (e) => { if (KEYS.includes(e.key) && document.activeElement.tagName !== 'INPUT') { e.preventDefault(); setDown(true); } });
+addEventListener('keyup', (e) => { if (KEYS.includes(e.key)) setDown(false); });
+cv.addEventListener('pointerdown', (e) => { e.preventDefault(); setDown(true); });
+addEventListener('pointerup', () => setDown(false));
+addEventListener('pointercancel', () => setDown(false));
+addEventListener('blur', () => setDown(false));
+
+// ---- Rendering ----
+const lerp = (a, b, t) => a + (b - a) * t;
+const lerpA = (a, b, t) => a + (b - a) * t;
+function interp() {
+  if (!snap) return null;
+  if (!prevSnap) return snap;
+  const t = Math.min(1, (performance.now() - snapTime) / (1000 / 60));
+  return {
+    c: snap.c.map((c, i) => c.map((v, j) => (j >= 6 ? v : (prevSnap.c[i] ? lerpA(prevSnap.c[i][j], v, t) : v)))),
+    b: snap.b.map((v, j) => lerp(prevSnap.b[j], v, t)),
+  };
+}
+
+function roundRect(x, y, w, h, r) { ctx.beginPath(); ctx.roundRect(x, y, w, h, r); }
+
+function drawHoop(h, rimY, flip) {
+  // pole + backboard
+  ctx.fillStyle = '#555'; ctx.fillRect(h.board - 4 + (flip ? 8 : -8), rimY - 120, 8, game.floor - rimY + 120);
+  ctx.fillStyle = '#fff'; ctx.strokeStyle = '#333'; ctx.lineWidth = 3;
+  ctx.fillRect(h.board - 6, rimY - 115, 12, 130); ctx.strokeRect(h.board - 6, rimY - 115, 12, 130);
+  // net
+  ctx.strokeStyle = 'rgba(255,255,255,.9)'; ctx.lineWidth = 2;
+  const x0 = Math.min(h.back, h.front), x1 = Math.max(h.back, h.front);
+  for (let i = 0; i <= 5; i++) {
+    const tx = lerp(x0, x1, i / 5), bx = lerp(x0 + 15, x1 - 15, i / 5);
+    ctx.beginPath(); ctx.moveTo(tx, rimY); ctx.lineTo(bx, rimY + 55); ctx.stroke();
+  }
+  ctx.beginPath(); ctx.moveTo(x0 + 7, rimY + 25); ctx.lineTo(x1 - 7, rimY + 25); ctx.stroke();
+  // rim
+  ctx.strokeStyle = '#ff5400'; ctx.lineWidth = 6;
+  ctx.beginPath(); ctx.moveTo(h.back, rimY); ctx.lineTo(h.front, rimY); ctx.stroke();
+}
+
+function drawChar(c) {
+  const [x, y, a, ax, ay, aa, h, al, team] = c;
+  const col = COLORS[team];
+  // arm behind? draw body first, arm on top
+  ctx.save(); ctx.translate(x, y); ctx.rotate(a);
+  // legs
+  ctx.fillStyle = '#222'; ctx.fillRect(-14, h / 2 - h * 0.28, 10, h * 0.28); ctx.fillRect(4, h / 2 - h * 0.28, 10, h * 0.28);
+  // jersey
+  ctx.fillStyle = col; roundRect(-17, -h / 2 + 22, 34, h - 22 - h * 0.25, 10); ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 14px system-ui'; ctx.textAlign = 'center';
+  ctx.fillText(team === game.team ? 'YOU' : '', 0, -h / 2 + 50);
+  // head
+  ctx.fillStyle = '#f1c27d'; ctx.beginPath(); ctx.arc(0, -h / 2 + 12, 16, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#222'; const f = team === 0 ? 1 : -1;
+  ctx.beginPath(); ctx.arc(6 * f, -h / 2 + 9, 2.6, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = col; ctx.fillRect(-16, -h / 2 - 4, 32, 7); // headband
+  ctx.restore();
+  // arm
+  ctx.save(); ctx.translate(ax, ay); ctx.rotate(aa);
+  ctx.fillStyle = col; roundRect(-6, -al / 2, 12, al * 0.45, 6); ctx.fill();
+  ctx.fillStyle = '#f1c27d'; roundRect(-5, -al / 2 + al * 0.4, 10, al * 0.6, 5); ctx.fill();
+  ctx.restore();
+}
+
+function drawBall(b) {
+  const [x, y, a] = b, r = game.variant.ballR;
+  ctx.save(); ctx.translate(x, y); ctx.rotate(a);
+  const beach = game.variant.name === 'Beach Ball';
+  if (beach) {
+    ['#ff595e', '#ffca3a', '#8ac926', '#1982c4'].forEach((c, i) => {
+      ctx.fillStyle = c; ctx.beginPath(); ctx.moveTo(0, 0); ctx.arc(0, 0, r, i * Math.PI / 2, (i + 1) * Math.PI / 2); ctx.fill();
+    });
+  } else {
+    ctx.fillStyle = game.variant.name === 'Heavy Ball' ? '#444' : '#f77f00';
+    ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#2b1300'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(-r, 0); ctx.lineTo(r, 0); ctx.moveTo(0, -r); ctx.lineTo(0, r); ctx.stroke();
+    ctx.beginPath(); ctx.arc(-r * 1.1, 0, r * 0.8, -0.9, 0.9); ctx.stroke();
+    ctx.beginPath(); ctx.arc(r * 1.1, 0, r * 0.8, Math.PI - 0.9, Math.PI + 0.9); ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function render() {
+  requestAnimationFrame(render);
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  if (!game) { ctx.fillStyle = '#8fd3ff'; ctx.fillRect(0, 0, 1000, 600); return; }
+  const v = game.variant;
+  ctx.fillStyle = v.sky; ctx.fillRect(0, 0, game.W, game.H);
+  // crowd stripes
+  ctx.fillStyle = 'rgba(0,0,0,.12)'; for (let i = 0; i < 20; i++) ctx.fillRect(i * 55, 330, 30, 30);
+  ctx.fillStyle = v.court; ctx.fillRect(0, game.floor, game.W, game.H - game.floor);
+  ctx.strokeStyle = 'rgba(255,255,255,.6)'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(game.W / 2, game.floor); ctx.lineTo(game.W / 2, game.H); ctx.stroke();
+  drawHoop(game.hoops[0], game.rimY, false);
+  drawHoop(game.hoops[1], game.rimY, true);
+  const s = interp();
+  if (s) { s.c.forEach(drawChar); drawBall(s.b); }
+  // scoreboard
+  ctx.textAlign = 'center'; ctx.font = 'bold 46px system-ui';
+  ctx.fillStyle = COLORS[0]; ctx.fillText(game.score[0], game.W / 2 - 50, 60);
+  ctx.fillStyle = '#fff'; ctx.fillText('-', game.W / 2, 60);
+  ctx.fillStyle = COLORS[1]; ctx.fillText(game.score[1], game.W / 2 + 50, 60);
+  ctx.font = '16px system-ui'; ctx.fillStyle = 'rgba(255,255,255,.85)'; ctx.fillText(v.name + ' · room ' + game.code, game.W / 2, 85);
+  if (banner && performance.now() < bannerUntil) {
+    ctx.fillStyle = 'rgba(0,0,0,.45)'; ctx.fillRect(0, 230, game.W, 80);
+    ctx.fillStyle = '#ffd166'; ctx.font = 'bold 38px system-ui'; ctx.fillText(banner, game.W / 2, 283);
+  }
+}
+render();
+</script>
+</body>
+</html>
